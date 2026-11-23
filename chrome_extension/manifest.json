@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "CME QuikStrike -> MT5 Open Interest Bridge",
+  "version": "1.0.0",
+  "description": "Extrae en 1 clic los 4 strikes con mayor Open Interest (Calls/Puts) desde CME QuikStrike y los envia directo a tus graficos de MetaTrader 5.",
+  "permissions": [],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://cmegroup-tools.quikstrike.net/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}
