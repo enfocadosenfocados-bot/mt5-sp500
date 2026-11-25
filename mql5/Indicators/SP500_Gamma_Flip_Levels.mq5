@@ -27,7 +27,7 @@ input double   InpManualAbsGamma   = 7000.00;// Abs Gamma Strike manual
 input group "=== Apariencia y Panel ==="
 input bool     InpShowPanel        = true;   // Mostrar panel de estado GEX
 input bool     InpShowGuidePanel   = true;   // Mostrar recuadro explicativo al lado
-input ENUM_BASE_CORNER InpPanelCorner = CORNER_RIGHT_UPPER; // Esquina del panel (no tapa tu panel izquierdo)
+input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER; // Esquina del panel (lado izquierdo para no tapar el precio)
 input bool     InpShowLineLabels   = true;   // Mostrar etiquetas de texto en las lineas
 input color    InpColorFlip        = clrGold;        // Color Gamma Flip
 input color    InpColorVolTrigger  = clrOrange;      // Color Vol Trigger
