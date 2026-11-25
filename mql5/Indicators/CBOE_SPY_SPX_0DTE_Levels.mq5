@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright   "Antigravity Quant Tools"
 #property link        "https://github.com"
-#property version     "1.00"
-#property description "Plotea los 20 strikes arriba y 20 abajo desde la Apertura del Dia (0DTE SPY o SPX de CBOE) ordenados por Volumen intradia o OI, con paneles de proyeccion y guia siempre a la izquierda."
+#property version     "1.01"
+#property description "Plotea los 20 strikes arriba y 20 abajo desde la Apertura del Dia (0DTE SPY o SPX de CBOE) auto-detectando escala SPY (~708) o US500 (~7080), con paneles siempre a la izquierda."
 #property indicator_chart_window
 #property indicator_buffers 0
 #property indicator_plots   0
@@ -34,7 +34,7 @@ input ENUM_CBOE_SOURCE InpSource          = CBOE_SRC_SPY;   // Fuente de Datos C
 input ENUM_RANK_MODE   InpRankMode        = RANK_BY_VOLUME; // Priorizar por Volumen o Open Interest
 input int              InpStrikesAbove    = 20;             // Strikes por ENCIMA de la Apertura del Dia
 input int              InpStrikesBelow    = 20;             // Strikes por DEBAJO de la Apertura del Dia
-input int              InpMaxLinesShow    = 14;             // Maximo de lineas mas grandes a dibujar
+input int              InpMaxLinesShow    = 20;             // Maximo de lineas mas grandes a dibujar (Top 20)
 input double           InpExtraOffset     = 0.0;            // Ajuste fino manual en puntos (opcional)
 input int              InpReloadSeconds   = 60;             // Re-leer CSV cada N segundos
 
@@ -56,6 +56,7 @@ struct CboeStrike
 {
    double raw_strike;
    double us500_strike;
+   double chart_strike; // Escala real del grafico actual (SPY ~708 o US500 ~7080)
    long   c_vol;
    double c_iv;
    double c_delta;
@@ -190,12 +191,20 @@ void BuildWindowFromOpen(double daily_open)
    int n = ArraySize(g_all);
    if(n == 0 || daily_open <= 0) return;
 
+   // Auto-detectar si el grafico es SPY (~700) o US500/SPX (~7000)
+   bool use_raw = (InpSource == CBOE_SRC_SPY && daily_open < 2000.0);
+   for(int i = 0; i < n; i++)
+   {
+      g_all[i].chart_strike = use_raw ? NormalizeDouble(g_all[i].raw_strike + InpExtraOffset, _Digits)
+                                      : g_all[i].us500_strike;
+   }
+
    // g_all viene ordenado ascendentemente por strike; buscamos el indice mas cercano a daily_open
    int pivot = 0;
-   double best_dist = MathAbs(g_all[0].us500_strike - daily_open);
+   double best_dist = MathAbs(g_all[0].chart_strike - daily_open);
    for(int i = 1; i < n; i++)
    {
-      double d = MathAbs(g_all[i].us500_strike - daily_open);
+      double d = MathAbs(g_all[i].chart_strike - daily_open);
       if(d < best_dist)
       {
          best_dist = d;
@@ -345,13 +354,13 @@ void DrawChartAndPanels(double daily_open, double curr_price)
                             s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
       }
 
-      DrawHLine("L_" + IntegerToString(drawn), s.us500_strike, lbl, clr, sty, wd);
+      DrawHLine("L_" + IntegerToString(drawn), s.chart_strike, lbl, clr, sty, wd);
    }
 
    //--- Panel 1: Estado en vivo, Volumen, Griegas y Proyeccion (SIEMPRE IZQUIERDA)
    if(InpShowHudPanel)
    {
-      int x = InpLeftX, y = InpTopY, w = 445, h = 212;
+      int x = InpLeftX, y = InpTopY, w = 500, h = 212;
       DrawBox("HUD_BG", x, y, w, h);
 
       double tot_v = (double)(g_tot_call_vol + g_tot_put_vol);
@@ -360,28 +369,29 @@ void DrawChartAndPanels(double daily_open, double curr_price)
 
       string proy = "Esperando datos de CBOE...";
       color  p_clr = clrSilver;
+      double thr = (curr_price < 2000.0) ? 1.0 : 8.0;
       if(has_magnet && curr_price > 0)
       {
-         double dist_mag = top_magnet.us500_strike - curr_price;
+         double dist_mag = top_magnet.chart_strike - curr_price;
          string dir_txt  = (dist_mag >= 0) ? "ARRIBA (Iman alcista)" : "ABAJO (Iman bajista)";
-         if(MathAbs(dist_mag) <= 8.0)
-            proy = StringFormat("SOBRE EL IMAN #%s (%.1f) -> Zona de consolidacion/giro", top_magnet.dom_type, top_magnet.us500_strike);
-         else if(has_call && curr_price > top_call.us500_strike)
-            proy = StringFormat("SOBRE CALL WALL %.1f -> Extension alcista o rechazo al Iman %.1f", top_call.us500_strike, top_magnet.us500_strike);
-         else if(has_put && curr_price < top_put.us500_strike)
-            proy = StringFormat("BAJO PUT WALL %.1f -> Panico bajista o rebote al Iman %.1f", top_put.us500_strike, top_magnet.us500_strike);
+         if(MathAbs(dist_mag) <= thr)
+            proy = StringFormat("SOBRE EL IMAN #%s (%s) -> Zona de consolidacion/giro", top_magnet.dom_type, DoubleToString(top_magnet.chart_strike, _Digits));
+         else if(has_call && curr_price > top_call.chart_strike)
+            proy = StringFormat("SOBRE CALL WALL %s -> Extension alcista o rechazo al Iman %s", DoubleToString(top_call.chart_strike, _Digits), DoubleToString(top_magnet.chart_strike, _Digits));
+         else if(has_put && curr_price < top_put.chart_strike)
+            proy = StringFormat("BAJO PUT WALL %s -> Panico bajista o rebote al Iman %s", DoubleToString(top_put.chart_strike, _Digits), DoubleToString(top_magnet.chart_strike, _Digits));
          else
-            proy = StringFormat("Precio apunta %s -> %.1f (%s Vol:%s)", dir_txt, top_magnet.us500_strike, top_magnet.dom_type, FmtK(top_magnet.dom_vol));
+            proy = StringFormat("Precio apunta %s -> %s (%s Vol:%s)", dir_txt, DoubleToString(top_magnet.chart_strike, _Digits), top_magnet.dom_type, FmtK(top_magnet.dom_vol));
 
          p_clr = (dist_mag >= 0) ? clrLimeGreen : clrTomato;
       }
 
-      DrawLeftText("H0", x + 10, y + 8,  StringFormat("CBOE %s 0DTE (Exp:%s) | Open:%.1f (+%d/-%d)", src_tag, g_exp_date, daily_open, InpStrikesAbove, InpStrikesBelow), clrGold, 9, true);
-      DrawLeftText("H1", x + 10, y + 25, "Sync: " + g_updated + " | Nota: CBOE ~15m delay (Auto cada 5 min)", clrSilver, 8, false);
-      DrawLeftText("H2", x + 10, y + 39, "---------------------------------------------------------------------", C'60,70,90', 8, false);
+      DrawLeftText("H0", x + 10, y + 8,  StringFormat("CBOE %s 0DTE (Exp:%s) | Open:%s (+%d/-%d)", src_tag, g_exp_date, DoubleToString(daily_open, _Digits), InpStrikesAbove, InpStrikesBelow), clrGold, 9, true);
+      DrawLeftText("H1", x + 10, y + 25, "Sync: " + g_updated + " | CBOE ~15m delay (Auto cada 5 min)", clrSilver, 8, false);
+      DrawLeftText("H2", x + 10, y + 39, "---------------------------------------------------------------------------", C'60,70,90', 8, false);
 
       if(has_magnet)
-         DrawLeftText("H3", x + 10, y + 53, StringFormat("IMAN #1 VOL: %.1f (%s %.0f%s) | Vol:%s OI:%s", top_magnet.us500_strike, src_tag, top_magnet.raw_strike, (top_magnet.dom_type=="CALL"?"C":"P"), FmtK(top_magnet.dom_vol), FmtK(top_magnet.dom_oi)), clrAqua, 8, true);
+         DrawLeftText("H3", x + 10, y + 53, StringFormat("IMAN #1 VOL: %s (%s %.0f%s) | Vol:%s OI:%s", DoubleToString(top_magnet.chart_strike, _Digits), src_tag, top_magnet.raw_strike, (top_magnet.dom_type=="CALL"?"C":"P"), FmtK(top_magnet.dom_vol), FmtK(top_magnet.dom_oi)), clrAqua, 8, true);
       else
          DrawLeftText("H3", x + 10, y + 53, "IMAN #1 VOL: Sin datos", clrSilver, 8, true);
 
@@ -391,11 +401,11 @@ void DrawChartAndPanels(double daily_open, double curr_price)
          DrawLeftText("H4", x + 10, y + 69, "", clrWhite, 8, false);
 
       if(has_call)
-         DrawLeftText("H5", x + 10, y + 87, StringFormat("CALL WALL: %.1f (%.0fC) | Vol:%s OI:%s IV:%.0f%% G:%.3f", top_call.us500_strike, top_call.raw_strike, FmtK(top_call.dom_vol), FmtK(top_call.dom_oi), top_call.dom_iv*100.0, top_call.dom_gamma), InpColorCallMain, 8, false);
+         DrawLeftText("H5", x + 10, y + 87, StringFormat("CALL WALL: %s (%.0fC) | Vol:%s OI:%s IV:%.0f%% G:%.3f", DoubleToString(top_call.chart_strike, _Digits), top_call.raw_strike, FmtK(top_call.dom_vol), FmtK(top_call.dom_oi), top_call.dom_iv*100.0, top_call.dom_gamma), InpColorCallMain, 8, false);
       if(has_put)
-         DrawLeftText("H6", x + 10, y + 103, StringFormat("PUT  WALL: %.1f (%.0fP) | Vol:%s OI:%s IV:%.0f%% G:%.3f", top_put.us500_strike, top_put.raw_strike, FmtK(top_put.dom_vol), FmtK(top_put.dom_oi), top_put.dom_iv*100.0, top_put.dom_gamma), InpColorPutMain, 8, false);
+         DrawLeftText("H6", x + 10, y + 103, StringFormat("PUT  WALL: %s (%.0fP) | Vol:%s OI:%s IV:%.0f%% G:%.3f", DoubleToString(top_put.chart_strike, _Digits), top_put.raw_strike, FmtK(top_put.dom_vol), FmtK(top_put.dom_oi), top_put.dom_iv*100.0, top_put.dom_gamma), InpColorPutMain, 8, false);
       if(has_oi)
-         DrawLeftText("H7", x + 10, y + 119, StringFormat("MAYOR OI : %.1f (%s) | OI:%s Vol:%s", max_oi_lvl.us500_strike, max_oi_lvl.dom_type, FmtK(max_oi_lvl.dom_oi), FmtK(max_oi_lvl.dom_vol)), clrGold, 8, false);
+         DrawLeftText("H7", x + 10, y + 119, StringFormat("MAYOR OI : %s (%s) | OI:%s Vol:%s", DoubleToString(max_oi_lvl.chart_strike, _Digits), max_oi_lvl.dom_type, FmtK(max_oi_lvl.dom_oi), FmtK(max_oi_lvl.dom_vol)), clrGold, 8, false);
 
       DrawLeftText("H8", x + 10, y + 137, StringFormat("FLUJO 0DTE: Calls %.0f%% (%s) vs Puts %.0f%% (%s)", c_pct, FmtK(g_tot_call_vol), p_pct, FmtK(g_tot_put_vol)), (c_pct >= p_pct ? clrLimeGreen : clrTomato), 8, true);
       DrawLeftText("H9", x + 10, y + 155, "PROYECCION HACIA DONDE VA EL PRECIO:", clrGold, 8, true);
@@ -410,18 +420,18 @@ void DrawChartAndPanels(double daily_open, double curr_price)
    //--- Panel 2: Guia explicativa de Vol / IV / Delta / Gamma / Int (SIEMPRE IZQUIERDA)
    if(InpShowGuidePanel)
    {
-      int gx = InpLeftX, gy = InpTopY + 220, gw = 445, gh = 165;
+      int gx = InpLeftX, gy = InpTopY + 220, gw = 500, gh = 165;
       DrawBox("GUIDE_BG", gx, gy, gw, gh);
 
       DrawLeftText("G0", gx + 10, gy + 8,  "GUIA RAPIDA CBOE 0DTE (Vol / IV / Delta / Gamma / Int)", clrWhite, 8, true);
-      DrawLeftText("G1", gx + 10, gy + 24, "---------------------------------------------------------------------", C'60,70,90', 8, false);
+      DrawLeftText("G1", gx + 10, gy + 24, "---------------------------------------------------------------------------", C'60,70,90', 8, false);
       DrawLeftText("G2", gx + 10, gy + 38, "Vol   : Contratos operados HOY. Es el iman vivo mas fuerte del dia.", clrAqua, 8, false);
-      DrawLeftText("G3", gx + 10, gy + 54, "Int   : Open Interest (OI). Muros estructurales abiertos de dias previos.", clrGold, 8, false);
-      DrawLeftText("G4", gx + 10, gy + 70, "IV    : Volatilidad Implicita. Si sube rapido, espera velas mas amplias.", clrSilver, 8, false);
-      DrawLeftText("G5", gx + 10, gy + 86, "Delta : Probabilidad aprox. de llegar al strike (0.50=50%, 0.20=20%).", clrSilver, 8, false);
-      DrawLeftText("G6", gx + 10, gy + 102,"Gamma : Aceleracion de cobertura MM. Gamma alta = iman o latigazo.", clrLimeGreen, 8, false);
-      DrawLeftText("G7", gx + 10, gy + 122,"Nota de actualizacion: CBOE actualiza cada 15 min (script auto cada 5m).", clrOrange, 8, true);
-      DrawLeftText("G8", gx + 10, gy + 140,"Lineas gruesas = Mayores imanes de Volumen/OI dentro de +-20 strikes.", clrSilver, 8, false);
+      DrawLeftText("G3", gx + 10, gy + 54, "Int   : Open Interest (OI). Muros estructurales de dias previos.", clrGold, 8, false);
+      DrawLeftText("G4", gx + 10, gy + 70, "IV    : Volatilidad Implicita. Si sube, espera velas mas amplias.", clrSilver, 8, false);
+      DrawLeftText("G5", gx + 10, gy + 86, "Delta : Probabilidad aprox. de tocar el strike (0.50=50%, 0.20=20%).", clrSilver, 8, false);
+      DrawLeftText("G6", gx + 10, gy + 102,"Gamma : Aceleracion cobertura MM. Gamma alta = iman o latigazo.", clrLimeGreen, 8, false);
+      DrawLeftText("G7", gx + 10, gy + 122,"Actualizacion: CBOE cada 15 min (script sincroniza auto cada 5m).", clrOrange, 8, true);
+      DrawLeftText("G8", gx + 10, gy + 140,"Lineas gruesas = Mayores imanes Vol/OI en +-20 strikes de Open.", clrSilver, 8, false);
    }
 
    ChartRedraw(0);
