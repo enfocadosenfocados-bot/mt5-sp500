@@ -338,7 +338,7 @@ void DrawChartAndPanels(double daily_open, double curr_price)
          clr = is_big ? InpColorCallMain : InpColorCallSec;
          sty = is_big ? STYLE_SOLID : STYLE_DOT;
          wd  = (c_rank == 1) ? 4 : (c_rank == 2 ? 3 : 1);
-         lbl = StringFormat("%s %.0fC | Vol:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
+         lbl = StringFormat("%s %.0fC | V:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
                             src_tag, s.raw_strike, FmtK(s.dom_vol), FmtK(s.dom_oi),
                             s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
       }
@@ -349,7 +349,7 @@ void DrawChartAndPanels(double daily_open, double curr_price)
          clr = is_big ? InpColorPutMain : InpColorPutSec;
          sty = is_big ? STYLE_SOLID : STYLE_DOT;
          wd  = (p_rank == 1) ? 4 : (p_rank == 2 ? 3 : 1);
-         lbl = StringFormat("%s %.0fP | Vol:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
+         lbl = StringFormat("%s %.0fP | V:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
                             src_tag, s.raw_strike, FmtK(s.dom_vol), FmtK(s.dom_oi),
                             s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
       }
@@ -444,7 +444,7 @@ void DrawHLine(string key, double price, string label, color clr, ENUM_LINE_STYL
    string obj = g_prefix + key;
    ObjectCreate(0, obj, OBJ_HLINE, 0, 0, price);
    ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, obj, OBJPROP_BACK, false);
+   ObjectSetInteger(0, obj, OBJPROP_BACK, true);
    ObjectSetDouble(0,  obj, OBJPROP_PRICE, 0, price);
    ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, obj, OBJPROP_STYLE, style);
@@ -453,13 +453,13 @@ void DrawHLine(string key, double price, string label, color clr, ENUM_LINE_STYL
    ObjectSetString(0,  obj, OBJPROP_TOOLTIP, label + " @ " + DoubleToString(price, _Digits));
 
    string t_obj = g_prefix + "T_" + key;
-   datetime t_pos = TimeCurrent() + PeriodSeconds(_Period) * 2;
+   datetime t_pos = TimeCurrent() + PeriodSeconds(_Period);
    ObjectCreate(0, t_obj, OBJ_TEXT, 0, t_pos, price);
    ObjectSetInteger(0, t_obj, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, t_obj, OBJPROP_BACK, false);
+   ObjectSetInteger(0, t_obj, OBJPROP_BACK, true);
    ObjectSetInteger(0, t_obj, OBJPROP_TIME, 0, t_pos);
    ObjectSetDouble(0,  t_obj, OBJPROP_PRICE, 0, price);
-   ObjectSetString(0,  t_obj, OBJPROP_TEXT, "  " + label + " [" + DoubleToString(price, _Digits) + "]");
+   ObjectSetString(0,  t_obj, OBJPROP_TEXT, " " + label);
    ObjectSetInteger(0, t_obj, OBJPROP_COLOR, clr);
    ObjectSetString(0,  t_obj, OBJPROP_FONT, "Segoe UI Bold");
    ObjectSetInteger(0, t_obj, OBJPROP_FONTSIZE, 8);
