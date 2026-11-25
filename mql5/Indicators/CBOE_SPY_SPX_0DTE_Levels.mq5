@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                   CBOE_SPY_SPX_0DTE_Levels.mq5   |
 //|                                  Copyright 2026, Antigravity     |
-//|      Niveles 0DTE CBOE (SPY / SPX): Vol, IV, Delta, Gamma, OI    |
+//|  CBOE 0DTE: +-20 Strikes, Max Pain, Net GEX, Mov. Esperado & HUD |
 //+------------------------------------------------------------------+
 #property copyright   "Antigravity Quant Tools"
 #property link        "https://github.com"
-#property version     "1.01"
-#property description "Plotea los 20 strikes arriba y 20 abajo desde la Apertura del Dia (0DTE SPY o SPX de CBOE) auto-detectando escala SPY (~708) o US500 (~7080), con paneles siempre a la izquierda."
+#property version     "1.10"
+#property description "Plotea TODOS los 20 strikes por encima y 20 por debajo de la Apertura del Dia (0DTE SPY/SPX CBOE) + Max Pain, Net GEX, Movimiento Esperado y proyeccion completa siempre a la izquierda."
 #property indicator_chart_window
 #property indicator_buffers 0
 #property indicator_plots   0
@@ -16,8 +16,8 @@
 //+------------------------------------------------------------------+
 enum ENUM_CBOE_SOURCE
 {
-   CBOE_SRC_SPY = 0,   // SPY 0DTE (Convertido a escala US500)
-   CBOE_SRC_SPX = 1    // SPX 0DTE (Escala directa indice)
+   CBOE_SRC_SPY = 0,   // SPY 0DTE (Auto-escala SPY ~708 o US500 ~7080)
+   CBOE_SRC_SPX = 1    // SPX 0DTE (Escala indice)
 };
 
 enum ENUM_RANK_MODE
@@ -34,13 +34,14 @@ input ENUM_CBOE_SOURCE InpSource          = CBOE_SRC_SPY;   // Fuente de Datos C
 input ENUM_RANK_MODE   InpRankMode        = RANK_BY_VOLUME; // Priorizar por Volumen o Open Interest
 input int              InpStrikesAbove    = 20;             // Strikes por ENCIMA de la Apertura del Dia
 input int              InpStrikesBelow    = 20;             // Strikes por DEBAJO de la Apertura del Dia
-input int              InpMaxLinesShow    = 20;             // Maximo de lineas mas grandes a dibujar (Top 20)
+input int              InpMaxAboveShow    = 20;             // Cuantos strikes ARRIBA dibujar (20 = todos)
+input int              InpMaxBelowShow    = 20;             // Cuantos strikes ABAJO dibujar (20 = todos)
 input double           InpExtraOffset     = 0.0;            // Ajuste fino manual en puntos (opcional)
 input int              InpReloadSeconds   = 60;             // Re-leer CSV cada N segundos
 
 input group "=== Paneles Explicativos (SIEMPRE A LA IZQUIERDA) ===";
-input bool             InpShowHudPanel    = true;           // Mostrar Panel de Proyeccion y Griegas
-input bool             InpShowGuidePanel  = true;           // Mostrar Guia de Vol/IV/Delta/Gamma/Int
+input bool             InpShowHudPanel    = true;           // Mostrar Panel de Proyeccion, Max Pain y GEX
+input bool             InpShowGuidePanel  = true;           // Mostrar Guia de Vol/IV/Delta/Gamma/Int/GEX
 input int              InpLeftX           = 12;             // Margen izquierdo X
 input int              InpTopY            = 24;             // Margen superior Y
 
@@ -49,6 +50,8 @@ input color            InpColorCallMain   = clrLimeGreen;      // Call dominante
 input color            InpColorCallSec    = clrMediumSeaGreen; // Call dominante (resto)
 input color            InpColorPutMain    = clrCrimson;        // Put dominante (Top 1-2)
 input color            InpColorPutSec     = clrTomato;         // Put dominante (resto)
+input color            InpColorMaxPain    = clrGold;           // Color linea Max Pain 0DTE
+input bool             InpShowMaxPain     = true;              // Dibujar linea Max Pain 0DTE
 input bool             InpShowOpenLine    = true;              // Mostrar linea Apertura del Dia
 
 //--- Estructura de Strike CBOE
@@ -56,7 +59,7 @@ struct CboeStrike
 {
    double raw_strike;
    double us500_strike;
-   double chart_strike; // Escala real del grafico actual (SPY ~708 o US500 ~7080)
+   double chart_strike;
    long   c_vol;
    double c_iv;
    double c_delta;
@@ -67,9 +70,8 @@ struct CboeStrike
    double p_delta;
    double p_gamma;
    long   p_oi;
-   // Ganador del strike segun modo
-   string dom_type;   // "CALL" o "PUT"
-   long   dom_score;  // Vol o OI ganador
+   string dom_type;
+   long   dom_score;
    long   dom_vol;
    long   dom_oi;
    double dom_iv;
@@ -80,16 +82,26 @@ struct CboeStrike
 //--- Variables globales
 string     g_prefix       = "CBOE0DTE_";
 CboeStrike g_all[];
-CboeStrike g_window[];
+CboeStrike g_above[];
+CboeStrike g_below[];
 string     g_exp_date     = "-";
-string     g_updated      = "-";
+string     g_updated      = "Sin archivo";
 double     g_spot_ref     = 0.0;
 double     g_ratio        = 10.0;
 long       g_tot_call_vol = 0;
 long       g_tot_put_vol  = 0;
+long       g_tot_call_oi  = 0;
+long       g_tot_put_oi   = 0;
+
+//--- Summary analytics
+double     g_max_pain_raw   = 0.0;
+double     g_max_pain_us500 = 0.0;
+double     g_net_gex_m      = 0.0;
+double     g_exp_move_raw   = 0.0;
+double     g_exp_move_us500 = 0.0;
 
 //+------------------------------------------------------------------+
-//| Formato compacto de volumen/OI (ej. 239.8k)                      |
+//| Formato compacto de volumen/OI                                   |
 //+------------------------------------------------------------------+
 string FmtK(long v)
 {
@@ -99,24 +111,83 @@ string FmtK(long v)
 }
 
 //+------------------------------------------------------------------+
-//| Cargar datos desde Common\Files\CBOE_0DTE_Levels.csv             |
+//| Ordenar arreglo de strikes descendentemente por dom_score        |
+//+------------------------------------------------------------------+
+void SortDescByScore(CboeStrike &arr[])
+{
+   int n = ArraySize(arr);
+   for(int i = 0; i < n - 1; i++)
+   {
+      for(int j = i + 1; j < n; j++)
+      {
+         if(arr[j].dom_score > arr[i].dom_score)
+         {
+            CboeStrike tmp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = tmp;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Cargar CBOE_0DTE_Levels.csv y CBOE_0DTE_Summary.csv              |
 //+------------------------------------------------------------------+
 void LoadCboeCSV()
 {
    ArrayResize(g_all, 0);
-   g_exp_date     = "-";
-   g_updated      = "Sin archivo";
-   g_spot_ref     = 0.0;
-   g_tot_call_vol = 0;
-   g_tot_put_vol  = 0;
-
-   string fn = "CBOE_0DTE_Levels.csv";
-   int h = FileOpen(fn, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
-   if(h == INVALID_HANDLE)
-      h = FileOpen(fn, FILE_READ | FILE_TXT | FILE_ANSI);
-   if(h == INVALID_HANDLE) return;
+   g_exp_date       = "-";
+   g_updated        = "Sin archivo";
+   g_spot_ref       = 0.0;
+   g_tot_call_vol   = 0;
+   g_tot_put_vol    = 0;
+   g_tot_call_oi    = 0;
+   g_tot_put_oi     = 0;
+   g_max_pain_raw   = 0.0;
+   g_max_pain_us500 = 0.0;
+   g_net_gex_m      = 0.0;
+   g_exp_move_raw   = 0.0;
+   g_exp_move_us500 = 0.0;
 
    string want_src = (InpSource == CBOE_SRC_SPY) ? "SPY" : "SPX";
+
+   // 1. Leer Summary CSV (Max Pain, Net GEX, Exp Move, Totales)
+   int hs = FileOpen("CBOE_0DTE_Summary.csv", FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(hs == INVALID_HANDLE)
+      hs = FileOpen("CBOE_0DTE_Summary.csv", FILE_READ | FILE_TXT | FILE_ANSI);
+   if(hs != INVALID_HANDLE)
+   {
+      while(!FileIsEnding(hs))
+      {
+         string line = FileReadString(hs);
+         StringTrimLeft(line);
+         StringTrimRight(line);
+         if(StringLen(line) < 10 || StringFind(line, "SOURCE") == 0) continue;
+         string cols[];
+         if(StringSplit(line, ',', cols) >= 14 && cols[0] == want_src)
+         {
+            g_max_pain_raw   = StringToDouble(cols[4]);
+            g_max_pain_us500 = StringToDouble(cols[5]);
+            g_net_gex_m      = StringToDouble(cols[6]);
+            g_exp_move_raw   = StringToDouble(cols[7]);
+            g_exp_move_us500 = StringToDouble(cols[8]);
+            g_tot_call_vol   = StringToInteger(cols[9]);
+            g_tot_put_vol    = StringToInteger(cols[10]);
+            g_tot_call_oi    = StringToInteger(cols[11]);
+            g_tot_put_oi     = StringToInteger(cols[12]);
+            break;
+         }
+      }
+      FileClose(hs);
+   }
+
+   // 2. Leer Levels CSV (Strikes completos)
+   int h = FileOpen("CBOE_0DTE_Levels.csv", FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(h == INVALID_HANDLE)
+      h = FileOpen("CBOE_0DTE_Levels.csv", FILE_READ | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+
+   long sum_cv = 0, sum_pv = 0, sum_co = 0, sum_po = 0;
 
    while(!FileIsEnding(h))
    {
@@ -126,8 +197,7 @@ void LoadCboeCSV()
       if(StringLen(line) < 10 || StringFind(line, "SOURCE") == 0) continue;
 
       string cols[];
-      int n = StringSplit(line, ',', cols);
-      if(n < 17) continue;
+      if(StringSplit(line, ',', cols) < 17) continue;
       if(cols[0] != want_src) continue;
 
       g_exp_date = cols[1];
@@ -152,8 +222,10 @@ void LoadCboeCSV()
       g_all[sz].p_gamma = StringToDouble(cols[14]);
       g_all[sz].p_oi    = StringToInteger(cols[15]);
 
-      g_tot_call_vol += g_all[sz].c_vol;
-      g_tot_put_vol  += g_all[sz].p_vol;
+      sum_cv += g_all[sz].c_vol;
+      sum_pv += g_all[sz].p_vol;
+      sum_co += g_all[sz].c_oi;
+      sum_po += g_all[sz].p_oi;
 
       long c_metric = (InpRankMode == RANK_BY_VOLUME) ? g_all[sz].c_vol : g_all[sz].c_oi;
       long p_metric = (InpRankMode == RANK_BY_VOLUME) ? g_all[sz].p_vol : g_all[sz].p_oi;
@@ -180,18 +252,23 @@ void LoadCboeCSV()
       }
    }
    FileClose(h);
+
+   if(g_tot_call_vol == 0) g_tot_call_vol = sum_cv;
+   if(g_tot_put_vol  == 0) g_tot_put_vol  = sum_pv;
+   if(g_tot_call_oi  == 0) g_tot_call_oi  = sum_co;
+   if(g_tot_put_oi   == 0) g_tot_put_oi   = sum_po;
 }
 
 //+------------------------------------------------------------------+
-//| Filtrar los 20 strikes arriba y 20 abajo de la Apertura del Dia  |
+//| Separar 20 strikes ARRIBA y 20 strikes ABAJO de la Apertura      |
 //+------------------------------------------------------------------+
 void BuildWindowFromOpen(double daily_open)
 {
-   ArrayResize(g_window, 0);
+   ArrayResize(g_above, 0);
+   ArrayResize(g_below, 0);
    int n = ArraySize(g_all);
    if(n == 0 || daily_open <= 0) return;
 
-   // Auto-detectar si el grafico es SPY (~700) o US500/SPX (~7000)
    bool use_raw = (InpSource == CBOE_SRC_SPY && daily_open < 2000.0);
    for(int i = 0; i < n; i++)
    {
@@ -199,7 +276,6 @@ void BuildWindowFromOpen(double daily_open)
                                       : g_all[i].us500_strike;
    }
 
-   // g_all viene ordenado ascendentemente por strike; buscamos el indice mas cercano a daily_open
    int pivot = 0;
    double best_dist = MathAbs(g_all[0].chart_strike - daily_open);
    for(int i = 1; i < n; i++)
@@ -212,31 +288,28 @@ void BuildWindowFromOpen(double daily_open)
       }
    }
 
-   int idx_from = MathMax(0, pivot - InpStrikesBelow);
-   int idx_to   = MathMin(n - 1, pivot + InpStrikesAbove);
-
-   for(int i = idx_from; i <= idx_to; i++)
+   // 20 strikes por ENCIMA de la apertura (pivot + 1 .. pivot + InpStrikesAbove)
+   int above_to = MathMin(n - 1, pivot + InpStrikesAbove);
+   for(int i = pivot + 1; i <= above_to; i++)
    {
       if(g_all[i].dom_score <= 0) continue;
-      int sz = ArraySize(g_window);
-      ArrayResize(g_window, sz + 1);
-      g_window[sz] = g_all[i];
+      int sz = ArraySize(g_above);
+      ArrayResize(g_above, sz + 1);
+      g_above[sz] = g_all[i];
    }
 
-   // Ordenar la ventana descendentemente por dom_score (mayor Volumen u OI)
-   int w = ArraySize(g_window);
-   for(int i = 0; i < w - 1; i++)
+   // 20 strikes por DEBAJO / EN la apertura (pivot - InpStrikesBelow .. pivot)
+   int below_from = MathMax(0, pivot - InpStrikesBelow);
+   for(int i = below_from; i <= pivot; i++)
    {
-      for(int j = i + 1; j < w; j++)
-      {
-         if(g_window[j].dom_score > g_window[i].dom_score)
-         {
-            CboeStrike tmp = g_window[i];
-            g_window[i] = g_window[j];
-            g_window[j] = tmp;
-         }
-      }
+      if(g_all[i].dom_score <= 0) continue;
+      int sz = ArraySize(g_below);
+      ArrayResize(g_below, sz + 1);
+      g_below[sz] = g_all[i];
    }
+
+   SortDescByScore(g_above);
+   SortDescByScore(g_below);
 }
 
 //+------------------------------------------------------------------+
@@ -244,7 +317,7 @@ void BuildWindowFromOpen(double daily_open)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   IndicatorSetString(INDICATOR_SHORTNAME, "CBOE 0DTE SPY/SPX Levels");
+   IndicatorSetString(INDICATOR_SHORTNAME, "CBOE 0DTE SPY/SPX + MaxPain & GEX");
    EventSetTimer(MathMax(15, InpReloadSeconds));
    LoadCboeCSV();
    return(INIT_SUCCEEDED);
@@ -292,152 +365,168 @@ int OnCalculate(const int rates_total,
 }
 
 //+------------------------------------------------------------------+
-//| Dibujar Lineas y Paneles en el Lado Izquierdo                    |
+//| Dibujar los 20 arriba + 20 abajo + Max Pain + Paneles Izquierda  |
 //+------------------------------------------------------------------+
 void DrawChartAndPanels(double daily_open, double curr_price)
 {
    ObjectsDeleteAll(0, g_prefix + "L_");
    ObjectsDeleteAll(0, g_prefix + "T_");
 
+   bool use_raw = (InpSource == CBOE_SRC_SPY && daily_open < 2000.0);
+   string src_tag = (InpSource == CBOE_SRC_SPY) ? "SPY" : "SPX";
+
    if(InpShowOpenLine && daily_open > 0)
       DrawHLine("L_OPEN", daily_open, StringFormat("OPEN DIA (+%d/-%d strikes)", InpStrikesAbove, InpStrikesBelow), clrDimGray, STYLE_DASHDOT, 1);
 
-   int w_size = ArraySize(g_window);
-   int drawn  = 0;
-   int c_rank = 0, p_rank = 0;
+   double max_pain_chart = use_raw ? g_max_pain_raw : g_max_pain_us500;
+   double exp_move_chart = use_raw ? g_exp_move_raw : g_exp_move_us500;
 
-   // Buscar mejor Call Wall, Put Wall y Magnet #1 dentro de la ventana
+   if(InpShowMaxPain && max_pain_chart > 0)
+      DrawHLine("L_MAXPAIN", max_pain_chart, "MAX PAIN 0DTE (Iman Cierre)", InpColorMaxPain, STYLE_DASHDOTDOT, 2);
+
+   // Encontrar Iman #1 global, Call Wall global y Put Wall global en los +-20 strikes
    CboeStrike top_magnet, top_call, top_put, max_oi_lvl;
    bool has_magnet = false, has_call = false, has_put = false, has_oi = false;
-   long best_oi = -1;
+   long best_score = -1, best_call_s = -1, best_put_s = -1, best_oi = -1;
 
-   for(int i = 0; i < w_size; i++)
+   int na = ArraySize(g_above);
+   int nb = ArraySize(g_below);
+
+   for(int i = 0; i < na; i++)
    {
-      if(!has_magnet) { top_magnet = g_window[i]; has_magnet = true; }
-      if(g_window[i].dom_type == "CALL" && !has_call) { top_call = g_window[i]; has_call = true; }
-      if(g_window[i].dom_type == "PUT"  && !has_put)  { top_put  = g_window[i]; has_put  = true; }
-      if(g_window[i].dom_oi > best_oi) { best_oi = g_window[i].dom_oi; max_oi_lvl = g_window[i]; has_oi = true; }
+      if(g_above[i].dom_score > best_score) { best_score = g_above[i].dom_score; top_magnet = g_above[i]; has_magnet = true; }
+      if(g_above[i].dom_type == "CALL" && g_above[i].dom_score > best_call_s) { best_call_s = g_above[i].dom_score; top_call = g_above[i]; has_call = true; }
+      if(g_above[i].dom_type == "PUT"  && g_above[i].dom_score > best_put_s)  { best_put_s  = g_above[i].dom_score; top_put  = g_above[i]; has_put  = true; }
+      if(g_above[i].dom_oi > best_oi) { best_oi = g_above[i].dom_oi; max_oi_lvl = g_above[i]; has_oi = true; }
+   }
+   for(int i = 0; i < nb; i++)
+   {
+      if(g_below[i].dom_score > best_score) { best_score = g_below[i].dom_score; top_magnet = g_below[i]; has_magnet = true; }
+      if(g_below[i].dom_type == "CALL" && g_below[i].dom_score > best_call_s) { best_call_s = g_below[i].dom_score; top_call = g_below[i]; has_call = true; }
+      if(g_below[i].dom_type == "PUT"  && g_below[i].dom_score > best_put_s)  { best_put_s  = g_below[i].dom_score; top_put  = g_below[i]; has_put  = true; }
+      if(g_below[i].dom_oi > best_oi) { best_oi = g_below[i].dom_oi; max_oi_lvl = g_below[i]; has_oi = true; }
    }
 
-   string src_tag = (InpSource == CBOE_SRC_SPY) ? "SPY" : "SPX";
-
-   for(int i = 0; i < w_size && drawn < InpMaxLinesShow; i++)
+   // Dibujar los 20 strikes por ENCIMA de la Apertura
+   int drawn_above = MathMin(na, InpMaxAboveShow);
+   for(int i = 0; i < drawn_above; i++)
    {
-      CboeStrike s = g_window[i];
-      drawn++;
-
-      color clr;
-      ENUM_LINE_STYLE sty;
-      int wd;
-      string lbl;
-
-      if(s.dom_type == "CALL")
-      {
-         c_rank++;
-         bool is_big = (c_rank <= 2);
-         clr = is_big ? InpColorCallMain : InpColorCallSec;
-         sty = is_big ? STYLE_SOLID : STYLE_DOT;
-         wd  = (c_rank == 1) ? 4 : (c_rank == 2 ? 3 : 1);
-         lbl = StringFormat("%s %.0fC | V:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
-                            src_tag, s.raw_strike, FmtK(s.dom_vol), FmtK(s.dom_oi),
-                            s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
-      }
-      else
-      {
-         p_rank++;
-         bool is_big = (p_rank <= 2);
-         clr = is_big ? InpColorPutMain : InpColorPutSec;
-         sty = is_big ? STYLE_SOLID : STYLE_DOT;
-         wd  = (p_rank == 1) ? 4 : (p_rank == 2 ? 3 : 1);
-         lbl = StringFormat("%s %.0fP | V:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
-                            src_tag, s.raw_strike, FmtK(s.dom_vol), FmtK(s.dom_oi),
-                            s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
-      }
-
-      DrawHLine("L_" + IntegerToString(drawn), s.chart_strike, lbl, clr, sty, wd);
+      CboeStrike s = g_above[i];
+      bool is_top = (i < 2);
+      color clr = (s.dom_type == "CALL") ? (is_top ? InpColorCallMain : InpColorCallSec)
+                                         : (is_top ? InpColorPutMain  : InpColorPutSec);
+      ENUM_LINE_STYLE sty = is_top ? STYLE_SOLID : STYLE_DOT;
+      int wd = (i == 0) ? 3 : (i == 1 ? 2 : 1);
+      string lbl = StringFormat("%s %.0f%s | V:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
+                                src_tag, s.raw_strike, (s.dom_type == "CALL" ? "C" : "P"),
+                                FmtK(s.dom_vol), FmtK(s.dom_oi), s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
+      DrawHLine("L_ABV_" + IntegerToString(i), s.chart_strike, lbl, clr, sty, wd);
    }
 
-   //--- Panel 1: Estado en vivo, Volumen, Griegas y Proyeccion (SIEMPRE IZQUIERDA)
+   // Dibujar los 20 strikes por DEBAJO de la Apertura
+   int drawn_below = MathMin(nb, InpMaxBelowShow);
+   for(int i = 0; i < drawn_below; i++)
+   {
+      CboeStrike s = g_below[i];
+      bool is_top = (i < 2);
+      color clr = (s.dom_type == "CALL") ? (is_top ? InpColorCallMain : InpColorCallSec)
+                                         : (is_top ? InpColorPutMain  : InpColorPutSec);
+      ENUM_LINE_STYLE sty = is_top ? STYLE_SOLID : STYLE_DOT;
+      int wd = (i == 0) ? 4 : (i == 1 ? 3 : 1);
+      string lbl = StringFormat("%s %.0f%s | V:%s OI:%s IV:%.0f%% D:%.2f G:%.3f",
+                                src_tag, s.raw_strike, (s.dom_type == "CALL" ? "C" : "P"),
+                                FmtK(s.dom_vol), FmtK(s.dom_oi), s.dom_iv * 100.0, s.dom_delta, s.dom_gamma);
+      DrawHLine("L_BLW_" + IntegerToString(i), s.chart_strike, lbl, clr, sty, wd);
+   }
+
+   //--- Panel 1: Estado en vivo, Max Pain, Net GEX, Mov. Esperado y Proyeccion (SIEMPRE IZQUIERDA)
    if(InpShowHudPanel)
    {
-      int x = InpLeftX, y = InpTopY, w = 500, h = 212;
+      int x = InpLeftX, y = InpTopY, w = 520, h = 278;
       DrawBox("HUD_BG", x, y, w, h);
 
       double tot_v = (double)(g_tot_call_vol + g_tot_put_vol);
       double c_pct = (tot_v > 0) ? (g_tot_call_vol / tot_v) * 100.0 : 50.0;
       double p_pct = (tot_v > 0) ? (g_tot_put_vol  / tot_v) * 100.0 : 50.0;
+      double pc_vol_ratio = (g_tot_call_vol > 0) ? (double)g_tot_put_vol / (double)g_tot_call_vol : 1.0;
+      double pc_oi_ratio  = (g_tot_call_oi  > 0) ? (double)g_tot_put_oi  / (double)g_tot_call_oi  : 1.0;
 
-      string proy = "Esperando datos de CBOE...";
+      string gex_txt = (g_net_gex_m >= 0)
+         ? StringFormat("+%.1fM (+GEX: MMs frenan velas / Rango)", g_net_gex_m)
+         : StringFormat("%.1fM (-GEX: Alta volatilidad / Aceleracion)", g_net_gex_m);
+      color gex_clr = (g_net_gex_m >= 0) ? clrLimeGreen : clrTomato;
+
+      double exp_hi = (curr_price > 0 && exp_move_chart > 0) ? (daily_open + exp_move_chart) : 0.0;
+      double exp_lo = (curr_price > 0 && exp_move_chart > 0) ? (daily_open - exp_move_chart) : 0.0;
+
+      string proy = "Esperando datos...";
       color  p_clr = clrSilver;
-      double thr = (curr_price < 2000.0) ? 1.0 : 8.0;
       if(has_magnet && curr_price > 0)
       {
+         double dist_mp  = (max_pain_chart > 0) ? (max_pain_chart - curr_price) : 0.0;
          double dist_mag = top_magnet.chart_strike - curr_price;
-         string dir_txt  = (dist_mag >= 0) ? "ARRIBA (Iman alcista)" : "ABAJO (Iman bajista)";
-         if(MathAbs(dist_mag) <= thr)
-            proy = StringFormat("SOBRE EL IMAN #%s (%s) -> Zona de consolidacion/giro", top_magnet.dom_type, DoubleToString(top_magnet.chart_strike, _Digits));
-         else if(has_call && curr_price > top_call.chart_strike)
-            proy = StringFormat("SOBRE CALL WALL %s -> Extension alcista o rechazo al Iman %s", DoubleToString(top_call.chart_strike, _Digits), DoubleToString(top_magnet.chart_strike, _Digits));
-         else if(has_put && curr_price < top_put.chart_strike)
-            proy = StringFormat("BAJO PUT WALL %s -> Panico bajista o rebote al Iman %s", DoubleToString(top_put.chart_strike, _Digits), DoubleToString(top_magnet.chart_strike, _Digits));
-         else
-            proy = StringFormat("Precio apunta %s -> %s (%s Vol:%s)", dir_txt, DoubleToString(top_magnet.chart_strike, _Digits), top_magnet.dom_type, FmtK(top_magnet.dom_vol));
+         string mp_dir   = (dist_mp >= 0) ? "ARRIBA" : "ABAJO";
 
-         p_clr = (dist_mag >= 0) ? clrLimeGreen : clrTomato;
+         if(g_net_gex_m < 0 && has_put && curr_price < top_put.chart_strike)
+            proy = StringFormat("-GEX bajo PUT WALL %s -> Aceleracion bajista | Iman cierre MaxPain %s", DoubleToString(top_put.chart_strike, _Digits), DoubleToString(max_pain_chart, _Digits));
+         else if(has_call && curr_price > top_call.chart_strike)
+            proy = StringFormat("Sobre CALL WALL %s -> Ruptura alcista o pullback hacia %s", DoubleToString(top_call.chart_strike, _Digits), DoubleToString(max_pain_chart, _Digits));
+         else if(max_pain_chart > 0)
+            proy = StringFormat("Iman Vol #%s (%s) | MaxPain %s (%s %+.1f) -> Sesgo %s", top_magnet.dom_type, DoubleToString(top_magnet.chart_strike, _Digits), DoubleToString(max_pain_chart, _Digits), mp_dir, dist_mp, (dist_mp >= 0 ? "ALCISTA" : "BAJISTA"));
+         else
+            proy = StringFormat("Iman Vol #%s -> %s (Vol:%s)", top_magnet.dom_type, DoubleToString(top_magnet.chart_strike, _Digits), FmtK(top_magnet.dom_vol));
+
+         p_clr = (dist_mp >= 0 || dist_mag >= 0) ? clrLimeGreen : clrTomato;
       }
 
-      DrawLeftText("H0", x + 10, y + 8,  StringFormat("CBOE %s 0DTE (Exp:%s) | Open:%s (+%d/-%d)", src_tag, g_exp_date, DoubleToString(daily_open, _Digits), InpStrikesAbove, InpStrikesBelow), clrGold, 9, true);
+      DrawLeftText("H0", x + 10, y + 8,  StringFormat("CBOE %s 0DTE (Exp:%s) | Open:%s | Dibujados: +%d / -%d", src_tag, g_exp_date, DoubleToString(daily_open, _Digits), drawn_above, drawn_below), clrGold, 9, true);
       DrawLeftText("H1", x + 10, y + 25, "Sync: " + g_updated + " | CBOE ~15m delay (Auto cada 5 min)", clrSilver, 8, false);
-      DrawLeftText("H2", x + 10, y + 39, "---------------------------------------------------------------------------", C'60,70,90', 8, false);
+      DrawLeftText("H2", x + 10, y + 39, "------------------------------------------------------------------------------", C'60,70,90', 8, false);
 
       if(has_magnet)
+      {
          DrawLeftText("H3", x + 10, y + 53, StringFormat("IMAN #1 VOL: %s (%s %.0f%s) | Vol:%s OI:%s", DoubleToString(top_magnet.chart_strike, _Digits), src_tag, top_magnet.raw_strike, (top_magnet.dom_type=="CALL"?"C":"P"), FmtK(top_magnet.dom_vol), FmtK(top_magnet.dom_oi)), clrAqua, 8, true);
-      else
-         DrawLeftText("H3", x + 10, y + 53, "IMAN #1 VOL: Sin datos", clrSilver, 8, true);
-
-      if(has_magnet)
-         DrawLeftText("H4", x + 10, y + 69, StringFormat("   Griegas Iman -> IV: %.1f%% | Delta: %.2f | Gamma: %.4f", top_magnet.dom_iv * 100.0, top_magnet.dom_delta, top_magnet.dom_gamma), clrWhite, 8, false);
-      else
-         DrawLeftText("H4", x + 10, y + 69, "", clrWhite, 8, false);
+         DrawLeftText("H4", x + 10, y + 69, StringFormat("   Griegas -> IV: %.1f%% | Delta: %.2f | Gamma: %.4f", top_magnet.dom_iv * 100.0, top_magnet.dom_delta, top_magnet.dom_gamma), clrWhite, 8, false);
+      }
 
       if(has_call)
-         DrawLeftText("H5", x + 10, y + 87, StringFormat("CALL WALL: %s (%.0fC) | Vol:%s OI:%s IV:%.0f%% G:%.3f", DoubleToString(top_call.chart_strike, _Digits), top_call.raw_strike, FmtK(top_call.dom_vol), FmtK(top_call.dom_oi), top_call.dom_iv*100.0, top_call.dom_gamma), InpColorCallMain, 8, false);
+         DrawLeftText("H5", x + 10, y + 87, StringFormat("CALL WALL  : %s (%.0fC) | Vol:%s OI:%s IV:%.0f%% G:%.3f", DoubleToString(top_call.chart_strike, _Digits), top_call.raw_strike, FmtK(top_call.dom_vol), FmtK(top_call.dom_oi), top_call.dom_iv*100.0, top_call.dom_gamma), InpColorCallMain, 8, false);
       if(has_put)
-         DrawLeftText("H6", x + 10, y + 103, StringFormat("PUT  WALL: %s (%.0fP) | Vol:%s OI:%s IV:%.0f%% G:%.3f", DoubleToString(top_put.chart_strike, _Digits), top_put.raw_strike, FmtK(top_put.dom_vol), FmtK(top_put.dom_oi), top_put.dom_iv*100.0, top_put.dom_gamma), InpColorPutMain, 8, false);
+         DrawLeftText("H6", x + 10, y + 103, StringFormat("PUT  WALL  : %s (%.0fP) | Vol:%s OI:%s IV:%.0f%% G:%.3f", DoubleToString(top_put.chart_strike, _Digits), top_put.raw_strike, FmtK(top_put.dom_vol), FmtK(top_put.dom_oi), top_put.dom_iv*100.0, top_put.dom_gamma), InpColorPutMain, 8, false);
       if(has_oi)
-         DrawLeftText("H7", x + 10, y + 119, StringFormat("MAYOR OI : %s (%s) | OI:%s Vol:%s", DoubleToString(max_oi_lvl.chart_strike, _Digits), max_oi_lvl.dom_type, FmtK(max_oi_lvl.dom_oi), FmtK(max_oi_lvl.dom_vol)), clrGold, 8, false);
+         DrawLeftText("H7", x + 10, y + 119, StringFormat("MAYOR OI   : %s (%s) | OI:%s Vol:%s", DoubleToString(max_oi_lvl.chart_strike, _Digits), max_oi_lvl.dom_type, FmtK(max_oi_lvl.dom_oi), FmtK(max_oi_lvl.dom_vol)), clrGold, 8, false);
 
-      DrawLeftText("H8", x + 10, y + 137, StringFormat("FLUJO 0DTE: Calls %.0f%% (%s) vs Puts %.0f%% (%s)", c_pct, FmtK(g_tot_call_vol), p_pct, FmtK(g_tot_put_vol)), (c_pct >= p_pct ? clrLimeGreen : clrTomato), 8, true);
-      DrawLeftText("H9", x + 10, y + 155, "PROYECCION HACIA DONDE VA EL PRECIO:", clrGold, 8, true);
-      DrawLeftText("H10", x + 10, y + 172, proy, p_clr, 8, true);
-      DrawLeftText("H11", x + 10, y + 190, StringFormat("Ref Spot %s: %.2f | Ratio US500/SPY: %.4f", src_tag, g_spot_ref, g_ratio), clrDarkGray, 8, false);
-   }
-   else
-   {
-      ObjectsDeleteAll(0, PREFIX_HUD());
+      DrawLeftText("H8",  x + 10, y + 139, StringFormat("MAX PAIN 0DTE: %s (Dist: %+.1f) | Mov.Esp: +-%s [%s - %s]", DoubleToString(max_pain_chart, _Digits), (max_pain_chart - curr_price), DoubleToString(exp_move_chart, _Digits), DoubleToString(exp_lo, _Digits), DoubleToString(exp_hi, _Digits)), InpColorMaxPain, 8, true);
+      DrawLeftText("H9",  x + 10, y + 157, "NET GEX 0DTE : " + gex_txt, gex_clr, 8, true);
+      DrawLeftText("H10", x + 10, y + 175, StringFormat("FLUJO 0DTE   : Calls %.0f%% (%s) vs Puts %.0f%% (%s) | P/C Vol:%.2f OI:%.2f", c_pct, FmtK(g_tot_call_vol), p_pct, FmtK(g_tot_put_vol), pc_vol_ratio, pc_oi_ratio), (c_pct >= p_pct ? clrLimeGreen : clrTomato), 8, false);
+
+      DrawLeftText("H11", x + 10, y + 195, "------------------------------------------------------------------------------", C'60,70,90', 8, false);
+      DrawLeftText("H12", x + 10, y + 209, "PROYECCION MULTI-FACTOR (HACIA DONDE VA EL PRECIO):", clrGold, 8, true);
+      DrawLeftText("H13", x + 10, y + 227, proy, p_clr, 8, true);
+      DrawLeftText("H14", x + 10, y + 248, StringFormat("Ref Spot %s: %.2f | Ratio US500/SPY: %.4f", src_tag, g_spot_ref, g_ratio), clrDarkGray, 8, false);
    }
 
-   //--- Panel 2: Guia explicativa de Vol / IV / Delta / Gamma / Int (SIEMPRE IZQUIERDA)
+   //--- Panel 2: Guia Completa (SIEMPRE IZQUIERDA)
    if(InpShowGuidePanel)
    {
-      int gx = InpLeftX, gy = InpTopY + 220, gw = 500, gh = 165;
+      int gx = InpLeftX, gy = InpTopY + 286, gw = 520, gh = 205;
       DrawBox("GUIDE_BG", gx, gy, gw, gh);
 
-      DrawLeftText("G0", gx + 10, gy + 8,  "GUIA RAPIDA CBOE 0DTE (Vol / IV / Delta / Gamma / Int)", clrWhite, 8, true);
-      DrawLeftText("G1", gx + 10, gy + 24, "---------------------------------------------------------------------------", C'60,70,90', 8, false);
-      DrawLeftText("G2", gx + 10, gy + 38, "Vol   : Contratos operados HOY. Es el iman vivo mas fuerte del dia.", clrAqua, 8, false);
-      DrawLeftText("G3", gx + 10, gy + 54, "Int   : Open Interest (OI). Muros estructurales de dias previos.", clrGold, 8, false);
-      DrawLeftText("G4", gx + 10, gy + 70, "IV    : Volatilidad Implicita. Si sube, espera velas mas amplias.", clrSilver, 8, false);
-      DrawLeftText("G5", gx + 10, gy + 86, "Delta : Probabilidad aprox. de tocar el strike (0.50=50%, 0.20=20%).", clrSilver, 8, false);
-      DrawLeftText("G6", gx + 10, gy + 102,"Gamma : Aceleracion cobertura MM. Gamma alta = iman o latigazo.", clrLimeGreen, 8, false);
-      DrawLeftText("G7", gx + 10, gy + 122,"Actualizacion: CBOE cada 15 min (script sincroniza auto cada 5m).", clrOrange, 8, true);
-      DrawLeftText("G8", gx + 10, gy + 140,"Lineas gruesas = Mayores imanes Vol/OI en +-20 strikes de Open.", clrSilver, 8, false);
+      DrawLeftText("G0", gx + 10, gy + 8,  "GUIA PRO CBOE 0DTE: COMO LEER CADA DATO Y SABER A DONDE VA", clrWhite, 8, true);
+      DrawLeftText("G1", gx + 10, gy + 24, "------------------------------------------------------------------------------", C'60,70,90', 8, false);
+      DrawLeftText("G2", gx + 10, gy + 38, "Vol      : Contratos operados HOY. Es el iman vivo mas fuerte del dia.", clrAqua, 8, false);
+      DrawLeftText("G3", gx + 10, gy + 54, "Int (OI) : Open Interest abierto de dias previos (muros estructurales).", clrGold, 8, false);
+      DrawLeftText("G4", gx + 10, gy + 70, "IV       : Volatilidad Implicita. Si sube rapido, velas mas amplias.", clrSilver, 8, false);
+      DrawLeftText("G5", gx + 10, gy + 86, "Delta    : Probabilidad aprox. de llegar al strike (0.50=50%, 0.20=20%).", clrSilver, 8, false);
+      DrawLeftText("G6", gx + 10, gy + 102,"Gamma    : Aceleracion cobertura MM. Gamma alta = iman o latigazo fuerte.", clrLimeGreen, 8, false);
+      DrawLeftText("G7", gx + 10, gy + 118,"Max Pain : Nivel donde expiran mas opciones sin valor (iman al cierre).", InpColorMaxPain, 8, false);
+      DrawLeftText("G8", gx + 10, gy + 134,"Net GEX  : +GEX = MMs compran caidas/venden subidas | -GEX = aceleran.", clrTomato, 8, false);
+      DrawLeftText("G9", gx + 10, gy + 150,"Mov.Esp  : Rango normal de hoy segun precio del Straddle ATM de CBOE.", clrSilver, 8, false);
+      DrawLeftText("G10",gx + 10, gy + 172,"Actualizacion: CBOE cada 15 min (el script refresca auto cada 5 min).", clrOrange, 8, true);
    }
 
    ChartRedraw(0);
 }
-
-string PREFIX_HUD() { return g_prefix + "HUD_"; }
 
 void DrawHLine(string key, double price, string label, color clr, ENUM_LINE_STYLE style, int width)
 {

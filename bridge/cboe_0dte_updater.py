@@ -1,24 +1,21 @@
 r"""
 =============================================================================
-CBOE SPY & SPX 0DTE UPDATER -> METATRADER 5 (IC MARKETS US500)
+CBOE SPY & SPX 0DTE UPDATER -> METATRADER 5 (IC MARKETS SPY / US500)
 =============================================================================
 Descarga gratuitamente (sin login) las cadenas de opciones 0DTE desde CBOE:
   - https://cdn.cboe.com/api/global/delayed_quotes/options/SPY.json
   - https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json
 
-Extrae para cada strike del vencimiento 0DTE (o el mas cercano del dia):
-  Vol (Volume), IV, Delta, Gamma, Int (Open Interest) para Calls y Puts.
-Convierte los strikes de SPY a escala US500 usando el ratio real SPX/SPY.
-
-Escribe automaticamente cada 5 minutos en:
-  %APPDATA%\MetaQuotes\Terminal\Common\Files\CBOE_0DTE_Levels.csv
+Calcula y guarda en Common\Files\:
+  1) CBOE_0DTE_Levels.csv  -> Strikes con Vol, IV, Delta, Gamma, OI (Int)
+  2) CBOE_0DTE_Summary.csv -> Max Pain, Net GEX 0DTE, Movimiento Esperado ATM,
+                              Put/Call Ratios (Vol & OI)
 =============================================================================
 """
 
 import os
 import re
 import csv
-import sys
 import time
 import argparse
 from datetime import datetime
@@ -41,14 +38,21 @@ CSV_HEADERS = [
     "UPDATED"
 ]
 
+SUMMARY_HEADERS = [
+    "SOURCE", "EXPIRATION", "SPOT_REF", "RATIO",
+    "MAX_PAIN_RAW", "MAX_PAIN_US500", "NET_GEX_M",
+    "EXP_MOVE_RAW", "EXP_MOVE_US500",
+    "TOT_CALL_VOL", "TOT_PUT_VOL", "TOT_CALL_OI", "TOT_PUT_OI",
+    "UPDATED"
+]
 
-def get_csv_paths():
+
+def get_dirs():
     appdata = os.environ.get("APPDATA", "")
     common_dir = os.path.join(appdata, "MetaQuotes", "Terminal", "Common", "Files")
     os.makedirs(common_dir, exist_ok=True)
-    common_csv = os.path.join(common_dir, "CBOE_0DTE_Levels.csv")
-    local_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CBOE_0DTE_Levels.csv")
-    return [common_csv, local_csv]
+    local_dir = os.path.dirname(os.path.abspath(__file__))
+    return [common_dir, local_dir]
 
 
 def fetch_cboe_chain(url, valid_prefixes):
@@ -77,6 +81,8 @@ def fetch_cboe_chain(url, valid_prefixes):
             "delta": round(float(o.get("delta") or 0.0), 4),
             "gamma": round(float(o.get("gamma") or 0.0), 4),
             "oi": int(float(o.get("open_interest") or 0)),
+            "bid": float(o.get("bid") or 0.0),
+            "ask": float(o.get("ask") or 0.0),
         })
 
     if not parsed:
@@ -95,23 +101,64 @@ def fetch_cboe_chain(url, valid_prefixes):
         st = x["strike"]
         if st not in by_strike:
             by_strike[st] = {
-                "c_vol": 0, "c_iv": 0.0, "c_delta": 0.0, "c_gamma": 0.0, "c_oi": 0,
-                "p_vol": 0, "p_iv": 0.0, "p_delta": 0.0, "p_gamma": 0.0, "p_oi": 0,
+                "c_vol": 0, "c_iv": 0.0, "c_delta": 0.0, "c_gamma": 0.0, "c_oi": 0, "c_mid": 0.0,
+                "p_vol": 0, "p_iv": 0.0, "p_delta": 0.0, "p_gamma": 0.0, "p_oi": 0, "p_mid": 0.0,
             }
+        mid = (x["bid"] + x["ask"]) / 2.0 if (x["bid"] > 0 or x["ask"] > 0) else 0.0
         if x["cp"] == "C":
             by_strike[st]["c_vol"] += x["vol"]
             by_strike[st]["c_oi"]  += x["oi"]
             by_strike[st]["c_iv"]    = x["iv"]
             by_strike[st]["c_delta"] = x["delta"]
             by_strike[st]["c_gamma"] = x["gamma"]
+            by_strike[st]["c_mid"]   = mid
         else:
             by_strike[st]["p_vol"] += x["vol"]
             by_strike[st]["p_oi"]  += x["oi"]
             by_strike[st]["p_iv"]    = x["iv"]
             by_strike[st]["p_delta"] = x["delta"]
             by_strike[st]["p_gamma"] = x["gamma"]
+            by_strike[st]["p_mid"]   = mid
 
     return spot, front_exp, by_strike
+
+
+def compute_analytics(spot, by_strike):
+    strikes = sorted(by_strike.keys())
+    if not strikes or spot <= 0:
+        return 0.0, 0.0, 0.0, 0, 0, 0, 0
+
+    # 1. Max Pain
+    max_pain = strikes[0]
+    min_pain_val = float("inf")
+    for test_st in strikes:
+        pain = 0.0
+        for st in strikes:
+            d = by_strike[st]
+            if test_st > st:
+                pain += (test_st - st) * d["c_oi"]
+            elif test_st < st:
+                pain += (st - test_st) * d["p_oi"]
+        if pain < min_pain_val:
+            min_pain_val = pain
+            max_pain = test_st
+
+    # 2. Net GEX (en millones $) y totales Vol/OI
+    net_gex = 0.0
+    tot_c_vol, tot_p_vol, tot_c_oi, tot_p_oi = 0, 0, 0, 0
+    for st in strikes:
+        d = by_strike[st]
+        tot_c_vol += d["c_vol"]
+        tot_p_vol += d["p_vol"]
+        tot_c_oi  += d["c_oi"]
+        tot_p_oi  += d["p_oi"]
+        net_gex += (d["c_oi"] * d["c_gamma"] - d["p_oi"] * d["p_gamma"]) * 100.0 * spot * spot * 0.01
+
+    # 3. Movimiento Esperado (ATM Straddle * 0.85)
+    atm_st = min(strikes, key=lambda s: abs(s - spot))
+    exp_move = (by_strike[atm_st]["c_mid"] + by_strike[atm_st]["p_mid"]) * 0.85
+
+    return max_pain, round(net_gex / 1e6, 2), round(exp_move, 2), tot_c_vol, tot_p_vol, tot_c_oi, tot_p_oi
 
 
 def update_once():
@@ -121,37 +168,41 @@ def update_once():
 
     ratio = (spx_spot / spy_spot) if (spy_spot > 0 and spx_spot > 0) else 10.0
     rows_out = []
+    summary_out = []
 
-    for st in sorted(spy_map.keys()):
-        d = spy_map[st]
-        if d["c_vol"] == 0 and d["p_vol"] == 0 and d["c_oi"] == 0 and d["p_oi"] == 0:
-            continue
-        us500_st = round(st * ratio, 2)
-        rows_out.append([
-            "SPY", spy_exp, round(spy_spot, 2), round(ratio, 5), st, us500_st,
-            d["c_vol"], d["c_iv"], d["c_delta"], d["c_gamma"], d["c_oi"],
-            d["p_vol"], d["p_iv"], d["p_delta"], d["p_gamma"], d["p_oi"],
-            now_str
+    for src, spot, exp, mp, r_mult in (
+        ("SPY", spy_spot, spy_exp, spy_map, ratio),
+        ("SPX", spx_spot, spx_exp, spx_map, 1.0),
+    ):
+        max_pain, net_gex_m, exp_move, tcv, tpv, tco, tpo = compute_analytics(spot, mp)
+        summary_out.append([
+            src, exp, round(spot, 2), round(r_mult, 5),
+            round(max_pain, 2), round(max_pain * r_mult, 2), net_gex_m,
+            round(exp_move, 2), round(exp_move * r_mult, 2),
+            tcv, tpv, tco, tpo, now_str
         ])
+        for st in sorted(mp.keys()):
+            d = mp[st]
+            if d["c_vol"] == 0 and d["p_vol"] == 0 and d["c_oi"] == 0 and d["p_oi"] == 0:
+                continue
+            rows_out.append([
+                src, exp, round(spot, 2), round(r_mult, 5), st, round(st * r_mult, 2),
+                d["c_vol"], d["c_iv"], d["c_delta"], d["c_gamma"], d["c_oi"],
+                d["p_vol"], d["p_iv"], d["p_delta"], d["p_gamma"], d["p_oi"],
+                now_str
+            ])
 
-    for st in sorted(spx_map.keys()):
-        d = spx_map[st]
-        if d["c_vol"] == 0 and d["p_vol"] == 0 and d["c_oi"] == 0 and d["p_oi"] == 0:
-            continue
-        rows_out.append([
-            "SPX", spx_exp, round(spx_spot, 2), 1.0, st, round(st, 2),
-            d["c_vol"], d["c_iv"], d["c_delta"], d["c_gamma"], d["c_oi"],
-            d["p_vol"], d["p_iv"], d["p_delta"], d["p_gamma"], d["p_oi"],
-            now_str
-        ])
-
-    for path in get_csv_paths():
-        with open(path, "w", newline="", encoding="utf-8") as f:
+    for d_path in get_dirs():
+        with open(os.path.join(d_path, "CBOE_0DTE_Levels.csv"), "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(CSV_HEADERS)
             w.writerows(rows_out)
+        with open(os.path.join(d_path, "CBOE_0DTE_Summary.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(SUMMARY_HEADERS)
+            w.writerows(summary_out)
 
-    print(f"[{now_str}] CBOE OK | SPY:{spy_spot:.2f} (Exp:{spy_exp}) | SPX:{spx_spot:.2f} (Exp:{spx_exp}) | Ratio:{ratio:.4f} | Filas:{len(rows_out)}")
+    print(f"[{now_str}] CBOE OK | SPY:{spy_spot:.2f} (Exp:{spy_exp}) | SPX:{spx_spot:.2f} | Filas:{len(rows_out)}")
 
 
 if __name__ == "__main__":
