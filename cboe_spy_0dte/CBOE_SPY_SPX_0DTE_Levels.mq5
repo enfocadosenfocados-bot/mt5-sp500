@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright   "Antigravity Quant Tools"
 #property link        "https://github.com"
-#property version     "1.10"
-#property description "Plotea TODOS los 20 strikes por encima y 20 por debajo de la Apertura del Dia (0DTE SPY/SPX CBOE) + Max Pain, Net GEX, Movimiento Esperado y proyeccion completa siempre a la izquierda."
+#property version     "1.11"
+#property description "Plotea los 20 strikes arriba y 20 abajo de la Apertura (0DTE SPY/SPX CBOE) con etiquetas visibles encima de cada linea (Vol, OI, IV, Delta, Gamma), Max Pain, Net GEX y paneles a la izquierda."
 #property indicator_chart_window
 #property indicator_buffers 0
 #property indicator_plots   0
@@ -335,6 +335,23 @@ void OnTimer()
    LoadCboeCSV();
 }
 
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id == CHARTEVENT_CHART_CHANGE)
+   {
+      datetime t_pos = GetRightEdgeTime();
+      int total = ObjectsTotal(0, 0, OBJ_TEXT);
+      string t_pref = g_prefix + "T_";
+      for(int i = 0; i < total; i++)
+      {
+         string name = ObjectName(0, i, 0, OBJ_TEXT);
+         if(StringFind(name, t_pref) == 0)
+            ObjectSetInteger(0, name, OBJPROP_TIME, 0, t_pos);
+      }
+      ChartRedraw(0);
+   }
+}
+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
                 const datetime &time[],
@@ -442,7 +459,7 @@ void DrawChartAndPanels(double daily_open, double curr_price)
    //--- Panel 1: Estado en vivo, Max Pain, Net GEX, Mov. Esperado y Proyeccion (SIEMPRE IZQUIERDA)
    if(InpShowHudPanel)
    {
-      int x = InpLeftX, y = InpTopY, w = 520, h = 278;
+      int x = InpLeftX, y = InpTopY, w = 585, h = 278;
       DrawBox("HUD_BG", x, y, w, h);
 
       double tot_v = (double)(g_tot_call_vol + g_tot_put_vol);
@@ -509,7 +526,7 @@ void DrawChartAndPanels(double daily_open, double curr_price)
    //--- Panel 2: Guia Completa (SIEMPRE IZQUIERDA)
    if(InpShowGuidePanel)
    {
-      int gx = InpLeftX, gy = InpTopY + 286, gw = 520, gh = 205;
+      int gx = InpLeftX, gy = InpTopY + 286, gw = 585, gh = 205;
       DrawBox("GUIDE_BG", gx, gy, gw, gh);
 
       DrawLeftText("G0", gx + 10, gy + 8,  "GUIA PRO CBOE 0DTE: COMO LEER CADA DATO Y SABER A DONDE VA", clrWhite, 8, true);
@@ -528,6 +545,23 @@ void DrawChartAndPanels(double daily_open, double curr_price)
    ChartRedraw(0);
 }
 
+datetime GetRightEdgeTime()
+{
+   datetime t0 = iTime(_Symbol, _Period, 0);
+   if(t0 <= 0) t0 = TimeCurrent();
+   int p_sec     = MathMax(60, PeriodSeconds(_Period));
+   int first_vis = (int)ChartGetInteger(0, CHART_FIRST_VISIBLE_BAR);
+   int vis_bars  = (int)ChartGetInteger(0, CHART_VISIBLE_BARS);
+   int right_bar = first_vis - vis_bars + 2;
+
+   if(right_bar >= 0)
+   {
+      datetime tr = iTime(_Symbol, _Period, right_bar);
+      if(tr > 0) return tr;
+   }
+   return t0 + (datetime)((-right_bar) * p_sec);
+}
+
 void DrawHLine(string key, double price, string label, color clr, ENUM_LINE_STYLE style, int width)
 {
    string obj = g_prefix + key;
@@ -541,16 +575,18 @@ void DrawHLine(string key, double price, string label, color clr, ENUM_LINE_STYL
    ObjectSetString(0,  obj, OBJPROP_TEXT, label);
    ObjectSetString(0,  obj, OBJPROP_TOOLTIP, label + " @ " + DoubleToString(price, _Digits));
 
+   // Etiqueta anclada a la derecha, justo ENCIMA de la linea y sin salirse de la pantalla
    string t_obj = g_prefix + "T_" + key;
-   datetime t_pos = TimeCurrent() + PeriodSeconds(_Period);
+   datetime t_pos = GetRightEdgeTime();
    ObjectCreate(0, t_obj, OBJ_TEXT, 0, t_pos, price);
    ObjectSetInteger(0, t_obj, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, t_obj, OBJPROP_BACK, true);
+   ObjectSetInteger(0, t_obj, OBJPROP_BACK, false);
+   ObjectSetInteger(0, t_obj, OBJPROP_ANCHOR, ANCHOR_RIGHT_LOWER);
    ObjectSetInteger(0, t_obj, OBJPROP_TIME, 0, t_pos);
    ObjectSetDouble(0,  t_obj, OBJPROP_PRICE, 0, price);
-   ObjectSetString(0,  t_obj, OBJPROP_TEXT, " " + label);
+   ObjectSetString(0,  t_obj, OBJPROP_TEXT, label + " [" + DoubleToString(price, _Digits) + "] ");
    ObjectSetInteger(0, t_obj, OBJPROP_COLOR, clr);
-   ObjectSetString(0,  t_obj, OBJPROP_FONT, "Segoe UI Bold");
+   ObjectSetString(0,  t_obj, OBJPROP_FONT, "Consolas Bold");
    ObjectSetInteger(0, t_obj, OBJPROP_FONTSIZE, 8);
 }
 
